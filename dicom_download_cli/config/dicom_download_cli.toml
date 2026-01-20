@@ -1,0 +1,38 @@
+# Orthanc CLI analysis configuration
+# Enable or disable whitelist/direct keyword checks at runtime.
+# This file is optional—if absent, defaults defined in code are used.
+
+enable_whitelist = false
+enable_direct_keywords = false
+download_all = true
+
+# Series types that should trigger a download when the Analyze API returns them.
+series_whitelist = [
+  "ADC",
+  "DWI",
+  "DWI0",
+  "DWI1000",
+  "SWAN",
+  "MRA_BRAIN",
+  "T1FLAIR_AXI",
+  "T1BRAVO_AXI",
+  "T2FLAIR_AXI",
+  "ASLSEQ",
+  "ASLSEQATT",
+  "ASLSEQATT_COLOR",
+  "ASLSEQCBF",
+  "ASLSEQCBF_COLOR",
+  "ASLSEQPW",
+  "ASLPROD",
+  "ASLPRODCBF",
+  "ASLPRODCBF_COLOR",
+  "DSC",
+  "DSCCBF_COLOR",
+  "DSCCBV_COLOR",
+  "DSCMTT_COLOR"
+]
+
+# Series descriptions that should always download regardless of analysis.
+direct_download_keywords = [
+  "MRA_BRAIN"
+]
