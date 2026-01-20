@@ -1,0 +1,12 @@
+/target
+**/target
+/.cursor/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+env/
+__pycache__/

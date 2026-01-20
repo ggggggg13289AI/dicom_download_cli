@@ -1,0 +1,19 @@
+[package]
+name = "dicom_download_cli"
+version = "0.1.2"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", features = ["json", "multipart", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.21.7"
+toml = "0.7"
+clap = { version = "4.0", features = ["derive"] }
+csv = "1.1"
+anyhow = "1.0"
+futures = "0.3"
+indicatif = "0.17" # 用於進度條
+colored = "2.0"    # 用於終端機顏色輸出
