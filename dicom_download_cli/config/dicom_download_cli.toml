@@ -2,6 +2,17 @@
 # Enable or disable whitelist/direct keyword checks at runtime.
 # This file is optional—if absent, defaults defined in code are used.
 
+# Runtime settings (all optional; CLI overrides TOML; code defaults last)
+# url = "http://10.103.51.1:8042/"
+# analyze_url = "http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload"
+# modality = "INFINTT-SERVER"
+# target = "RADAX"
+# username = ""
+# password = ""
+# concurrency = 5
+# report_csv = "report.csv"
+# report_json = "report.json"
+
 enable_whitelist = false
 enable_direct_keywords = false
 download_all = true
