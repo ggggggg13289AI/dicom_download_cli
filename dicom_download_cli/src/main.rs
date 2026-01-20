@@ -19,6 +19,16 @@ use std::time::Duration;
 // 1. Pure Domain Logic & Configuration (Functional Core)
 // =================================================================================
 
+const DEFAULT_CONFIG_PATH: &str = "config/dicom_download_cli.toml";
+const DEFAULT_MODALITY: &str = "INFINTT-SERVER";
+const DEFAULT_TARGET: &str = "RADAX";
+const DEFAULT_URL: &str = "http://10.103.51.1:8042/";
+const DEFAULT_ANALYZE_URL: &str =
+    "http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload";
+const DEFAULT_REPORT_CSV: &str = "report.csv";
+const DEFAULT_REPORT_JSON: &str = "report.json";
+const DEFAULT_CONCURRENCY: usize = 5;
+
 /// 控制白名單與直接下載關鍵字
 struct AnalysisConfig {
     series_whitelist: HashSet<String>,
@@ -64,7 +74,11 @@ impl AnalysisConfig {
 
     fn load(path: Option<&PathBuf>) -> Result<Self> {
         if let Some(path) = path {
-            Self::from_file(path)
+            if path.exists() {
+                Self::from_file(path)
+            } else {
+                Ok(Self::default())
+            }
         } else {
             Ok(Self::default())
         }
@@ -111,6 +125,138 @@ struct AnalysisConfigFile {
     download_all: Option<bool>,
     series_whitelist: Option<Vec<String>>,
     direct_download_keywords: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default)]
+struct RuntimeConfigFile {
+    url: Option<String>,
+    analyze_url: Option<String>,
+    modality: Option<String>,
+    target: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    concurrency: Option<usize>,
+    report_csv: Option<PathBuf>,
+    report_json: Option<PathBuf>,
+}
+
+struct EffectiveConfig {
+    url: String,
+    analyze_url: String,
+    modality: String,
+    target: String,
+    username: Option<String>,
+    password: Option<String>,
+    concurrency: usize,
+    report_csv: PathBuf,
+    report_json: PathBuf,
+}
+
+impl EffectiveConfig {
+    fn defaults() -> Self {
+        Self {
+            url: DEFAULT_URL.to_string(),
+            analyze_url: DEFAULT_ANALYZE_URL.to_string(),
+            modality: DEFAULT_MODALITY.to_string(),
+            target: DEFAULT_TARGET.to_string(),
+            username: None,
+            password: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            report_csv: PathBuf::from(DEFAULT_REPORT_CSV),
+            report_json: PathBuf::from(DEFAULT_REPORT_JSON),
+        }
+    }
+}
+
+fn load_runtime_config(path: Option<&PathBuf>) -> Result<Option<RuntimeConfigFile>> {
+    let path = match path {
+        Some(path) => path.clone(),
+        None => PathBuf::from(DEFAULT_CONFIG_PATH),
+    };
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&path).context("Failed to read runtime config")?;
+    let parsed: RuntimeConfigFile =
+        toml::from_str(&content).context("Failed to parse runtime config")?;
+    Ok(Some(parsed))
+}
+
+fn sanitize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn merge_runtime_config(cli: &Cli, toml_config: Option<RuntimeConfigFile>) -> EffectiveConfig {
+    let mut config = EffectiveConfig::defaults();
+
+    if let Some(file) = toml_config {
+        if let Some(url) = file.url {
+            config.url = url;
+        }
+        if let Some(analyze_url) = file.analyze_url {
+            config.analyze_url = analyze_url;
+        }
+        if let Some(modality) = file.modality {
+            config.modality = modality;
+        }
+        if let Some(target) = file.target {
+            config.target = target;
+        }
+        if let Some(concurrency) = file.concurrency {
+            config.concurrency = concurrency;
+        }
+        if let Some(report_csv) = file.report_csv {
+            config.report_csv = report_csv;
+        }
+        if let Some(report_json) = file.report_json {
+            config.report_json = report_json;
+        }
+        if let Some(username) = sanitize_optional_string(file.username) {
+            config.username = Some(username);
+        }
+        if let Some(password) = sanitize_optional_string(file.password) {
+            config.password = Some(password);
+        }
+    }
+
+    if let Some(url) = cli.url.as_ref() {
+        config.url = url.clone();
+    }
+    if let Some(analyze_url) = cli.analyze_url.as_ref() {
+        config.analyze_url = analyze_url.clone();
+    }
+    if let Some(modality) = cli.modality.as_ref() {
+        config.modality = modality.clone();
+    }
+    if let Some(target) = cli.target.as_ref() {
+        config.target = target.clone();
+    }
+    if let Some(concurrency) = cli.concurrency {
+        config.concurrency = concurrency;
+    }
+    if let Some(report_csv) = cli.report_csv.as_ref() {
+        config.report_csv = report_csv.clone();
+    }
+    if let Some(report_json) = cli.report_json.as_ref() {
+        config.report_json = report_json.clone();
+    }
+    if let Some(username) = sanitize_optional_string(cli.username.clone()) {
+        config.username = Some(username);
+    }
+    if let Some(password) = sanitize_optional_string(cli.password.clone()) {
+        config.password = Some(password);
+    }
+
+    config
 }
 
 fn should_download(
@@ -780,25 +926,24 @@ fn write_csv_report(path: &PathBuf, results: &[ProcessResult]) -> Result<()> {
 #[command(name = "dicom_download_cli")]
 #[command(about = "Orthanc DICOM Batch Downloader", long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "INFINTT-SERVER")]
-    modality: String,
+    #[arg(long, help = "INFINTT-SERVER")]
+    modality: Option<String>,
 
-    #[arg(long, default_value = "RADAX", help = "ORTHANC | RADAX")]
-    target: String,
+    #[arg(long, help = "ORTHANC | RADAX")]
+    target: Option<String>,
 
     #[arg(
         long,
-        default_value = "http://10.103.51.1:8042/",
         help = "http://10.103.1.193/orthanc-a | http://10.103.51.1:8042/"
     )]
-    url: String,
+    url: Option<String>,
 
     #[arg(
         long,
-        default_value = "http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload",
         help = "http://10.103.1.193:8000/api/v1/series/dicom/analyze/by-upload | http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload"
     )]
-    analyze_url: String,
+    analyze_url: Option<String>,
+
     #[arg(long)]
     username: Option<String>,
 
@@ -811,62 +956,69 @@ struct Cli {
     #[arg(
         long,
         value_name = "FILE",
-        help = "TOML file to override whitelist/direct keywords"
+        help = "TOML file to override runtime/analysis settings"
     )]
     config: Option<PathBuf>,
 
-    #[arg(long, default_value = "report.csv")]
-    report_csv: PathBuf,
+    #[arg(long)]
+    report_csv: Option<PathBuf>,
 
-    #[arg(long, default_value = "report.json")]
-    report_json: PathBuf,
+    #[arg(long)]
+    report_json: Option<PathBuf>,
 
-    #[arg(short, long, default_value_t = 5)]
-    concurrency: usize,
+    #[arg(short, long)]
+    concurrency: Option<usize>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    let runtime_file = load_runtime_config(Some(&config_path))?;
+    let effective = merge_runtime_config(&args, runtime_file);
+
     let client = Arc::new(OrthancClient::new(
-        &args.url,
-        &args.analyze_url,
-        &args.target,
-        args.username,
-        args.password,
+        &effective.url,
+        &effective.analyze_url,
+        &effective.target,
+        effective.username.clone(),
+        effective.password.clone(),
     )?);
 
     println!("Reading input file: {:?}", args.input);
     let accessions = parse_input_file(&args.input).context("Failed to parse input file")?;
     println!("Found {} accessions to process.", accessions.len());
 
-    let analysis_config = Arc::new(AnalysisConfig::load(args.config.as_ref())?);
+    let analysis_config = Arc::new(AnalysisConfig::load(Some(&config_path))?);
     let mp = Arc::new(MultiProgress::new());
 
     let results: Vec<ProcessResult> = stream::iter(accessions)
         .map(|acc| {
             let client = client.clone();
-            let modality = args.modality.clone();
+            let modality = effective.modality.clone();
             let mp = mp.clone();
             let analysis_config = analysis_config.clone();
             async move {
                 process_single_accession(client, acc, modality, mp, analysis_config).await
             }
         })
-        .buffer_unordered(args.concurrency)
+        .buffer_unordered(effective.concurrency)
         .collect()
         .await;
 
     println!("\nProcessing complete. Writing reports...");
-    write_reports(&args.report_csv, &args.report_json, &results)?;
+    write_reports(&effective.report_csv, &effective.report_json, &results)?;
     let success_count = results.iter().filter(|r| r.status == "Success").count();
     println!(
         "Summary: {} Success, {} Partial/Failed. Reports -> CSV: {:?}, JSON: {:?}",
         success_count,
         results.len() - success_count,
-        args.report_csv,
-        args.report_json
+        effective.report_csv,
+        effective.report_json
     );
 
     Ok(())
