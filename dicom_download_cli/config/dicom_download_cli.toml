@@ -1,21 +1,21 @@
-# Orthanc CLI analysis configuration
-# Enable or disable whitelist/direct keyword checks at runtime.
-# This file is optional—if absent, defaults defined in code are used.
+## Orthanc CLI analysis configuration
+## Enable or disable whitelist/direct keyword checks at runtime.
+## This file is optional—if absent, defaults defined in code are used.
 
-# Runtime settings (all optional; CLI overrides TOML; code defaults last)
-# url = "http://10.103.51.1:8042/"
-# analyze_url = "http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload"
-# modality = "INFINTT-SERVER"
-# target = "RADAX"
+## Runtime settings (all optional; CLI overrides TOML; code defaults last)
+analyze_url = "http://10.103.51.1:8000/api/v1/series/dicom/analyze/by-upload"
+modality = "INFINTT-SERVER"
+target = "RADAX"
+url = "http://10.103.51.1:8042/"
 # username = ""
 # password = ""
-# concurrency = 5
-# report_csv = "report.csv"
-# report_json = "report.json"
+concurrency = 5
+report_csv = "report.csv"
+report_json = "report.json"
 
-enable_whitelist = false
-enable_direct_keywords = false
 download_all = true
+enable_direct_keywords = false
+enable_whitelist = false
 
 # Series types that should trigger a download when the Analyze API returns them.
 series_whitelist = [
@@ -40,10 +40,10 @@ series_whitelist = [
   "DSC",
   "DSCCBF_COLOR",
   "DSCCBV_COLOR",
-  "DSCMTT_COLOR"
+  "DSCMTT_COLOR",
 ]
 
 # Series descriptions that should always download regardless of analysis.
 direct_download_keywords = [
-  "MRA_BRAIN"
+  "MRA_BRAIN",
 ]
