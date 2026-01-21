@@ -5,6 +5,15 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::path::PathBuf;
 
+/// 去重並保持原始順序（與 Python deduplicate_preserve_order 對齊）
+fn deduplicate_preserve_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+
 /// Default runtime configuration file path.
 pub const DEFAULT_CONFIG_PATH: &str = "config/dicom_download_cli.toml";
 /// Default Orthanc modality AET that the CLI queries.
@@ -22,6 +31,8 @@ pub const DEFAULT_REPORT_CSV: &str = "report.csv";
 pub const DEFAULT_REPORT_JSON: &str = "report.json";
 /// Default number of simultaneous accession workers.
 pub const DEFAULT_CONCURRENCY: usize = 5;
+/// Default dcm2niix executable path (assumes in PATH).
+pub const DEFAULT_DCM2NIIX_PATH: &str = "dcm2niix";
 
 /// Determines which series should be downloaded by the CLI.
 pub struct AnalysisConfig {
@@ -130,6 +141,56 @@ struct AnalysisConfigFile {
     direct_download_keywords: Option<Vec<String>>,
 }
 
+/// Configuration for dcm2niix conversion.
+#[derive(Deserialize, Clone)]
+pub struct ConversionConfig {
+    /// Enable dcm2niix conversion (can be overridden by --convert flag).
+    pub enabled: Option<bool>,
+    /// Path to dcm2niix executable.
+    pub dcm2niix_path: Option<String>,
+    /// Additional arguments to pass to dcm2niix.
+    pub dcm2niix_args: Option<Vec<String>>,
+    /// Delete DICOM files after successful conversion.
+    pub delete_dicom_after_conversion: Option<bool>,
+}
+
+impl Default for ConversionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Some(false),
+            dcm2niix_path: Some(DEFAULT_DCM2NIIX_PATH.to_string()),
+            dcm2niix_args: Some(vec!["-z".into(), "y".into(), "-b".into(), "y".into()]),
+            delete_dicom_after_conversion: Some(false),
+        }
+    }
+}
+
+impl ConversionConfig {
+    /// Returns the dcm2niix path, falling back to default.
+    pub fn get_dcm2niix_path(&self) -> &str {
+        self.dcm2niix_path
+            .as_deref()
+            .unwrap_or(DEFAULT_DCM2NIIX_PATH)
+    }
+
+    /// Returns the dcm2niix arguments, falling back to defaults.
+    pub fn get_dcm2niix_args(&self) -> Vec<String> {
+        self.dcm2niix_args
+            .clone()
+            .unwrap_or_else(|| vec!["-z".into(), "y".into(), "-b".into(), "y".into()])
+    }
+
+    /// Returns whether conversion is enabled from config.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
+    /// Returns whether to delete DICOM files after conversion.
+    pub fn should_delete_dicom(&self) -> bool {
+        self.delete_dicom_after_conversion.unwrap_or(false)
+    }
+}
+
 #[derive(Deserialize, Default, Clone)]
 /// Runtime overrides loaded from the TOML config referenced by `main`.
 pub struct RuntimeConfigFile {
@@ -142,6 +203,8 @@ pub struct RuntimeConfigFile {
     pub concurrency: Option<usize>,
     pub report_csv: Option<PathBuf>,
     pub report_json: Option<PathBuf>,
+    /// dcm2niix conversion settings.
+    pub conversion: Option<ConversionConfig>,
 }
 
 /// Final configuration used throughout the download workflow.
@@ -266,7 +329,7 @@ pub fn parse_input_file(path: &PathBuf) -> Result<Vec<String>> {
                     }
                 }
             }
-            Ok(accessions)
+            Ok(deduplicate_preserve_order(accessions))
         }
         "json" => {
             let file = File::open(path)?;
@@ -288,7 +351,7 @@ pub fn parse_input_file(path: &PathBuf) -> Result<Vec<String>> {
                         None
                     })
                     .collect();
-                Ok(accessions)
+                Ok(deduplicate_preserve_order(accessions))
             } else {
                 Err(anyhow!("JSON root must be an array"))
             }

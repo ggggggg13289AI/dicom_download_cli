@@ -47,3 +47,19 @@ series_whitelist = [
 direct_download_keywords = [
   "MRA_BRAIN",
 ]
+
+## dcm2niix conversion settings
+[conversion]
+# Enable dcm2niix conversion (can be overridden by --convert flag)
+enabled = false
+
+# dcm2niix executable path (default: assumes in PATH)
+dcm2niix_path = "dcm2niix"
+
+# dcm2niix arguments
+# -z y = gzip compression (.nii.gz output)
+# -b y = generate BIDS JSON sidecar
+dcm2niix_args = ["-z", "y", "-b", "y"]
+
+# Delete DICOM files after successful conversion (default: false)
+delete_dicom_after_conversion = false

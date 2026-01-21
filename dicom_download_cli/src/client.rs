@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::io::Cursor;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -16,13 +17,32 @@ pub struct OrthancClient {
     pub target_aet: String,
 }
 
-pub struct StudyMeta {
-    pub study_uid: Option<String>,
+/// DICOM 標籤資訊，用於產生人類可讀目錄名稱
+#[derive(Clone, Debug, Default)]
+pub struct DicomStudyInfo {
+    pub patient_id: String,
+    pub study_date: String,
+    pub modality: String,
+    pub accession_number: String,
+}
+
+/// 下載計畫：圍繞資料設計程式碼（Linus 第二原則）
+#[derive(Clone, Debug)]
+pub struct DownloadPlan {
+    pub study_folder: String,
+    pub series: Vec<SeriesDownloadPlan>,
+}
+
+/// 單一 Series 的下載計畫
+#[derive(Clone, Debug)]
+pub struct SeriesDownloadPlan {
+    pub series_folder: String,
+    pub instances: Vec<String>,
 }
 
 pub struct SeriesMeta {
-    pub series_uid: Option<String>,
     pub description: Option<String>,
+    pub series_number: Option<String>,
     pub instances: Vec<String>,
 }
 
@@ -55,7 +75,7 @@ impl OrthancClient {
         }
 
         Ok(Self {
-            client: builder.build().unwrap(),
+            client: builder.build().context("Failed to build HTTP client")?,
             base_url: base_url.trim_end_matches('/').to_string(),
             analyze_url: analyze_url.to_string(),
             target_aet: target_aet.to_string(),
@@ -117,7 +137,11 @@ impl OrthancClient {
     }
 
     /// Performs a generic Orthanc modality query and collects all returned answer contents.
-    pub async fn execute_modality_query(&self, modality: &str, payload: Value) -> Result<Vec<Value>> {
+    pub async fn execute_modality_query(
+        &self,
+        modality: &str,
+        payload: Value,
+    ) -> Result<Vec<Value>> {
         let resp = self
             .client
             .post(format!("{}/modalities/{}/query", self.base_url, modality))
@@ -267,7 +291,11 @@ impl OrthancClient {
     }
 
     /// Finds a single SOPInstanceUID for the series to pull a sample instance.
-    pub async fn find_instance_sop(&self, modality: &str, series_uid: &str) -> Result<Option<String>> {
+    pub async fn find_instance_sop(
+        &self,
+        modality: &str,
+        series_uid: &str,
+    ) -> Result<Option<String>> {
         let payload = json!({
             "Level": "Instance",
             "Query": { "SeriesInstanceUID": series_uid },
@@ -360,13 +388,18 @@ impl OrthancClient {
         if resp.status().is_success() {
             let json_body: Value = resp.json().await?;
             if let Some(arr) = json_body.as_array() {
-                if let Some(first) = arr.get(0) {
+                if let Some(first) = arr.first() {
                     return Ok(first
                         .get("series_type")
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string()));
                 }
             }
+        } else {
+            eprintln!(
+                "Warning: Analyze API returned non-success status: {}",
+                resp.status()
+            );
         }
         Ok(None)
     }
@@ -411,7 +444,7 @@ impl OrthancClient {
             .send()
             .await?
             .error_for_status()?;
-        
+
         // Support both ["id1", "id2"] and [{"ID": "id1"}, ...]
         let items: Vec<Value> = resp.json().await?;
         let mut ids = Vec::new();
@@ -427,23 +460,6 @@ impl OrthancClient {
         Ok(ids)
     }
 
-    /// Fetches StudyInstanceUID and tags for a local Orthanc study UUID.
-    pub async fn get_study_meta(&self, study_id: &str) -> Result<StudyMeta> {
-        let resp = self
-            .client
-            .get(format!("{}/studies/{}", self.base_url, study_id))
-            .send()
-            .await?
-            .error_for_status()?;
-        let body: Value = resp.json().await?;
-        let study_uid = body
-            .get("MainDicomTags")
-            .and_then(|t| t.get("StudyInstanceUID"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        Ok(StudyMeta { study_uid })
-    }
-
     /// Returns Orthanc series UUIDs under a study UUID.
     pub async fn list_series_ids(&self, study_id: &str) -> Result<Vec<String>> {
         let resp = self
@@ -452,7 +468,7 @@ impl OrthancClient {
             .send()
             .await?
             .error_for_status()?;
-        
+
         // Support both ["id1", "id2"] and [{"ID": "id1"}, ...]
         let items: Vec<Value> = resp.json().await?;
         let mut ids = Vec::new();
@@ -477,14 +493,13 @@ impl OrthancClient {
             .await?
             .error_for_status()?;
         let body: Value = resp.json().await?;
-        let series_uid = body
-            .get("MainDicomTags")
-            .and_then(|t| t.get("SeriesInstanceUID"))
+        let tags = body.get("MainDicomTags");
+        let description = tags
+            .and_then(|t| t.get("SeriesDescription"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let description = body
-            .get("MainDicomTags")
-            .and_then(|t| t.get("SeriesDescription"))
+        let series_number = tags
+            .and_then(|t| t.get("SeriesNumber"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let instances: Vec<String> = body
@@ -497,9 +512,35 @@ impl OrthancClient {
             })
             .unwrap_or_default();
         Ok(SeriesMeta {
-            series_uid,
             description,
+            series_number,
             instances,
         })
     }
+}
+
+/// 從 DICOM bytes 解析 Study 資訊（與 Python pydicom 對齊）
+pub fn parse_dicom_study_info(data: &[u8]) -> Result<DicomStudyInfo> {
+    use dicom_object::from_reader;
+
+    let cursor = Cursor::new(data);
+    let obj = from_reader(cursor).context("Failed to parse DICOM")?;
+
+    // 取得 DICOM 標籤值的輔助函數
+    let get_tag = |tag: dicom_object::Tag| -> String {
+        obj.element(tag)
+            .ok()
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    use dicom_object::Tag;
+
+    Ok(DicomStudyInfo {
+        patient_id: get_tag(Tag(0x0010, 0x0020)),       // PatientID
+        study_date: get_tag(Tag(0x0008, 0x0020)),       // StudyDate
+        modality: get_tag(Tag(0x0008, 0x0060)),         // Modality
+        accession_number: get_tag(Tag(0x0008, 0x0050)), // AccessionNumber
+    })
 }
