@@ -296,32 +296,24 @@ async fn run_download(args: DownloadArgs, cfg_path: &PathBuf) -> Result<()> {
 
     let conversion_config = Arc::new(conversion_config);
 
-    let results: Vec<ProcessResult> = stream::iter(accessions)
-        .map(|acc| {
-            let client = client.clone();
-            let dicom_root = dicom_root.clone();
-            let niix_root = niix_root.clone();
-            let concurrency = effective.concurrency;
-            let retry_cfg = retry_config.clone();
-            let conv_cfg = conversion_config.clone();
-            async move {
-                download_accession_v2(
-                    client,
-                    acc,
-                    dicom_root,
-                    niix_root,
-                    concurrency,
-                    analyze_enabled,
-                    convert_enabled,
-                    conv_cfg,
-                    retry_cfg,
-                )
-                .await
-            }
-        })
-        .buffer_unordered(effective.concurrency)
-        .collect()
+    // 循序處理每個 accession（一個一個 study 下載）
+    // Series/Instance 層級使用併發
+    let mut results: Vec<ProcessResult> = Vec::with_capacity(accessions.len());
+    for acc in accessions {
+        let result = download_accession_v2(
+            client.clone(),
+            acc,
+            dicom_root.clone(),
+            niix_root.clone(),
+            effective.concurrency,
+            analyze_enabled,
+            convert_enabled,
+            conversion_config.clone(),
+            retry_config.clone(),
+        )
         .await;
+        results.push(result);
+    }
 
     write_reports(&effective.report_csv, &effective.report_json, &results)?;
 
