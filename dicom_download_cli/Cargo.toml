@@ -17,3 +17,4 @@ anyhow = "1.0"
 futures = "0.3"
 indicatif = "0.17" # 用於進度條
 colored = "2.0"    # 用於終端機顏色輸出
+dicom-object = "0.8" # DICOM 解析

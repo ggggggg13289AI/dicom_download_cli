@@ -19,6 +19,10 @@ pub struct ProcessResult {
     pub downloaded_series: Vec<String>,
     pub matched_series: Vec<String>,
     pub failed_series: Vec<String>,
+    /// Series that were successfully converted to NIfTI.
+    pub converted_series: Vec<String>,
+    /// Series that failed NIfTI conversion.
+    pub conversion_failed: Vec<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -46,17 +50,29 @@ pub async fn process_single_accession(
         Err(e) => return finish_with_error(pb, &mut res, format!("Series query failed: {}", e)),
     };
 
-    let local_uids = client.get_local_series(&study_uid).await.unwrap_or_default();
-    
+    let local_uids = client
+        .get_local_series(&study_uid)
+        .await
+        .unwrap_or_default();
+
     for (idx, series_json) in remote_series.into_iter().enumerate() {
         let (uid, desc) = client.extract_series_info(&series_json);
         if local_uids.contains(&uid) {
             continue;
         }
 
-        pb.set_message(format!(" [{}/{}] {}", idx + 1, res.matched_series.len() + 1, desc));
-        
-        if let Err(e) = process_series(&client, &modality, &study_uid, &uid, &desc, &config, &pb, &mut res).await {
+        pb.set_message(format!(
+            " [{}/{}] {}",
+            idx + 1,
+            res.matched_series.len() + 1,
+            desc
+        ));
+
+        if let Err(e) = process_series(
+            &client, &modality, &study_uid, &uid, &desc, &config, &pb, &mut res,
+        )
+        .await
+        {
             res.reason.push(e.to_string());
         }
     }
@@ -79,7 +95,10 @@ async fn process_series(
     let should_dl = if config.download_all || should_download(desc, None, config) {
         true
     } else {
-        match client.sample_series_type(modality, study_uid, series_uid).await? {
+        match client
+            .sample_series_type(modality, study_uid, series_uid)
+            .await?
+        {
             Some(t) => should_download(desc, Some(&t), config),
             None => false,
         }
@@ -93,7 +112,10 @@ async fn process_series(
     pb.set_message(format!("Downloading {}...", desc));
 
     let move_payload = json!({ "SeriesInstanceUID": series_uid, "StudyInstanceUID": study_uid });
-    match client.c_move(modality, "Series", move_payload, true).await? {
+    match client
+        .c_move(modality, "Series", move_payload, true)
+        .await?
+    {
         Some(job_id) => {
             client.wait_for_job(&job_id, pb).await?;
             res.downloaded_series.push(desc.to_string());
@@ -126,12 +148,20 @@ fn finish_with_error(pb: ProgressBar, res: &mut ProcessResult, err: String) -> P
 }
 
 pub fn summarize_status(downloaded: &[String], reasons: &[String]) -> String {
-    if reasons.is_empty() { "Success".into() }
-    else if !downloaded.is_empty() { "Partial".into() }
-    else { "Failed".into() }
+    if reasons.is_empty() {
+        "Success".into()
+    } else if !downloaded.is_empty() {
+        "Partial".into()
+    } else {
+        "Failed".into()
+    }
 }
 
-pub fn write_reports(csv_path: &PathBuf, json_path: &PathBuf, results: &[ProcessResult]) -> Result<()> {
+pub fn write_reports(
+    csv_path: &PathBuf,
+    json_path: &PathBuf,
+    results: &[ProcessResult],
+) -> Result<()> {
     write_csv_report(csv_path, results)?;
     write_json_report(json_path, results)?;
     Ok(())
@@ -145,7 +175,17 @@ fn write_json_report(path: &PathBuf, results: &[ProcessResult]) -> Result<()> {
 
 fn write_csv_report(path: &PathBuf, results: &[ProcessResult]) -> Result<()> {
     let mut wtr = csv::Writer::from_path(path)?;
-    wtr.write_record(&["AccessionNumber", "Status", "Reason", "DownloadedCount", "MatchedCount", "FailedCount", "Timestamp"])?;
+    wtr.write_record(&[
+        "AccessionNumber",
+        "Status",
+        "Reason",
+        "DownloadedCount",
+        "MatchedCount",
+        "FailedCount",
+        "ConvertedCount",
+        "ConversionFailedCount",
+        "Timestamp",
+    ])?;
     for r in results {
         wtr.write_record(&[
             &r.accession,
@@ -154,6 +194,8 @@ fn write_csv_report(path: &PathBuf, results: &[ProcessResult]) -> Result<()> {
             &r.downloaded_series.len().to_string(),
             &r.matched_series.len().to_string(),
             &r.failed_series.len().to_string(),
+            &r.converted_series.len().to_string(),
+            &r.conversion_failed.len().to_string(),
             &r.timestamp.to_rfc3339(),
         ])?;
     }
