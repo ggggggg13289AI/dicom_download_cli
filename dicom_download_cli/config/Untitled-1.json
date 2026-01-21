@@ -1,0 +1,65 @@
+{
+    "ExpectedNumberOfInstances": None,
+    "ID": "11447187-f5d39c73-5d8bcf54-45ba47b6-a8705c80",
+    "Instances": [
+        "060f5696-bc0cd525-e5398e0e-f9dbf1a8-405ac3c2",
+        "0743ef8a-51b5f4eb-523f425d-e480c10b-4fb8cf3f",
+        "1ce22f64-a56b6a2e-c0f2a9d8-838e6ec1-e58ac247",
+        "26e2ada7-62c159fd-a1109cb2-1f56afec-0d2cd578",
+        "303b73fa-d410ed46-006baa57-94dda3b9-71393c45",
+        "33e14b56-329b2581-8a6af852-1f22fa2d-731d77ea",
+        "391b32d4-83e40406-c4823276-a5e362d0-51b7f8af",
+        "3a4327a5-e82c0ccb-9f7b53c5-7b1f61f2-10951725",
+        "4c3ece13-1dea5085-c750b284-5b0c69df-77bbbcb1",
+        "523f68be-ea5806e4-1e28eb2e-e92c80df-9f8858af",
+        "5291f78e-dc40ca40-d3936252-a8e26e5c-f207d304",
+        "553e4832-a5046fa7-f88e877e-9f38cd29-343ed8f4",
+        "6fd388a2-6af7545a-b9ffff5d-c51c9708-03315806",
+        "766d6915-9fb8ee56-2c8db917-d2064f3e-15282497",
+        "7f13349e-8392f215-0a5e5624-e9d88e92-c70b9b90",
+        "85543247-d345a41a-1d114142-e8016686-dfafcf8c",
+        "98a6ddcc-6990c8cc-ea020a86-e488ff1c-16c3a250",
+        "a2a4b314-93090c5d-b23e0d9c-05879571-52ee5d44",
+        "ac3d3488-42616525-1c8c83d2-1e1af98a-91711ea6",
+        "c638fa3d-1823b804-cb1b1fa9-4bb117a7-48dea618",
+        "da7b82ed-4ca836a4-86be1d48-bb3c99a1-f6f3c145",
+        "df6054ef-b6cf9e9c-ffad6e9e-b34f6f74-8b0d8253",
+        "f0d665ba-97e4f84c-68b70818-d33ad381-cdcfb3fe"
+    ],
+    "IsStable": True,
+    "Labels": [],
+    "LastUpdate": "20260119T115511",
+    "MainDicomTags": {
+        "BodyPartExamined": "BRAIN",
+        "Manufacturer": "GE MEDICAL SYSTEMS",
+        "Modality": "MR",
+        "OperatorsName": "MR^SdC^Account",
+        "ProtocolName": "1.14 8CH PD study(Neurol",
+        "RequestAttributesSequence": [
+            {
+                "GenericGroupLength": "150",
+                "RequestedProcedureDescription": "Brain MRI for PD (-C)",
+                "RequestedProcedureID": "200707061",
+                "ScheduledProcedureStepDescription": "Brain MRI for PD (-C)",
+                "ScheduledProcedureStepID": "200707061",
+                "ScheduledProtocolCodeSequence": [
+                    {
+                        "CodeMeaning": "200707061",
+                        "CodeValue": "200707061",
+                        "CodingSchemeDesignator": "SHUANGHO",
+                        "GenericGroupLength": "52"
+                    }
+                ]
+            }
+        ],
+        "SeriesDate": "20230919",
+        "SeriesDescription": "ADC",
+        "SeriesInstanceUID": "1.2.840.113619.2.80.2406839619.6912.1695112127.2.2",
+        "SeriesNumber": "3",
+        "SeriesTime": "160719",
+        "StationName": "GEHCMR3T"
+    },
+    "ParentStudy": "dbf0d2ff-387ebdac-308802b0-40f1d73c-955d614f",
+    "Status": "Unknown",
+    "Type": "Series"
+}

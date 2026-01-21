@@ -18,12 +18,18 @@ A focused workspace for the Orthanc-based DICOM download tool. The Rust-based `d
    - `modality` must match a remote AET entry that exists on the Orthanc serving the `--url` argument.
    - `target` is the AET name by which that remote Orthanc refers to your local destination Orthanc (i.e., how the remote server sees the Orthanc described by `--url`).
    - Both PACS configurations must be prepared (AET defined, network access allowed) before issuing MOVE jobs so the transfer succeeds.
-4. From the workspace root:
-   ```bash
-   cd dicom_download_cli
-   cargo run -- <input_path> [--url <orthanc>] [--analyze-url <analyze>] [--concurrency <n>]
-   ```
-5. Provide either a CSV (with `AccessionNumber` header) or JSON file as the `input_path`. The CLI emits progress to stderr and writes the success/failure report to the path provided via `--report-path`.
+4. From the workspace root, choose子命令：
+   - Remote（C-MOVE 推送）：  
+     ```bash
+     cd dicom_download_cli
+     cargo run -- remote -i <input_path> [--url <orthanc>] [--analyze-url <analyze>] [--modality <AET>] [--target <AET>] [--concurrency <n>]
+     ```
+   - Download（直接寫檔）：  
+     ```bash
+     cd dicom_download_cli
+     cargo run -- download -i <input_path> --output <dir> [--url <orthanc>] [--concurrency <n>]
+     ```
+5. Provide either a CSV/JSON file as `-i/--input`; report CSV 也可再當輸入，會自動讀取 `AccessionNumber/accession/acc` 欄位。 Reports emit to `--report-csv` / `--report-json`.
 
 ## Configuration reference
 
@@ -65,12 +71,18 @@ A focused workspace for the Orthanc-based DICOM download tool. The Rust-based `d
    - `modality` 需與你透過 `--url` 指向的 Orthanc 中所定義的遠端 AET 相符。
    - `target` 則是該遠端 Orthanc 用來識別本地 Orthanc 的 AET 名稱（也就是該 Orthanc 在接收 MOVE 任務時，用來稱呼 `--url` 所指的實體）。
    - 確保雙方 PACS 均已註冊這些 AET 並能互相連線，才能讓 MOVE job 執行成功。
-4. 於專案根目錄執行：
-   ```bash
-   cd dicom_download_cli
-   cargo run -- <input_path> [--url <orthanc>] [--analyze-url <analyze>] [--concurrency <n>]
-   ```
-5. `input_path` 可指定含有 `AccessionNumber` 欄位的 CSV，或符合格式的 JSON 陣列；CLI 會於 stderr 顯示進度，並把成功/失敗報告寫入 `--report-path`。
+4. 於專案根目錄執行，依子命令選擇：
+   - Remote（C-MOVE 推送）：  
+     ```bash
+     cd dicom_download_cli
+     cargo run -- remote -i <input_path> [--url <orthanc>] [--analyze-url <analyze>] [--modality <AET>] [--target <AET>] [--concurrency <n>]
+     ```
+   - Download（直接寫檔到本機）：  
+     ```bash
+     cd dicom_download_cli
+     cargo run -- download -i <input_path> --output <dir> [--url <orthanc>] [--concurrency <n>]
+     ```
+5. `input_path` 可指定 CSV/JSON，或 CLI 產出的報表 CSV；會自動尋找 `AccessionNumber/accession/acc` 欄位。CLI 會於 stderr 顯示進度，並把成功/失敗報告寫入 `--report-csv`/`--report-json`。
 
 ## 設定檔參考
 

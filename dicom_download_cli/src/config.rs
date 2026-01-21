@@ -130,7 +130,7 @@ struct AnalysisConfigFile {
     direct_download_keywords: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 /// Runtime overrides loaded from the TOML config referenced by `main`.
 pub struct RuntimeConfigFile {
     pub url: Option<String>,
@@ -244,11 +244,25 @@ pub fn parse_input_file(path: &PathBuf) -> Result<Vec<String>> {
             let file = File::open(path)?;
             let mut rdr = csv::Reader::from_reader(file);
             let mut accessions = Vec::new();
+            let headers = rdr.headers().ok().cloned();
+            let idx = headers.as_ref().and_then(|h| {
+                h.iter().enumerate().find_map(|(i, name)| {
+                    let lower = name.to_ascii_lowercase();
+                    if lower == "accessionnumber" || lower == "accession" || lower == "acc" {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+            });
+
             for result in rdr.records() {
                 let record = result?;
-                if let Some(acc) = record.get(0) {
-                    if !acc.trim().is_empty() {
-                        accessions.push(acc.trim().to_string());
+                let target_idx = idx.unwrap_or(0);
+                if let Some(acc) = record.get(target_idx) {
+                    let trimmed = acc.trim();
+                    if !trimmed.is_empty() {
+                        accessions.push(trimmed.to_string());
                     }
                 }
             }
