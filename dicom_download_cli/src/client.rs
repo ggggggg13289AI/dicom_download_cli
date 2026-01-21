@@ -16,6 +16,16 @@ pub struct OrthancClient {
     pub target_aet: String,
 }
 
+pub struct StudyMeta {
+    pub study_uid: Option<String>,
+}
+
+pub struct SeriesMeta {
+    pub series_uid: Option<String>,
+    pub description: Option<String>,
+    pub instances: Vec<String>,
+}
+
 impl OrthancClient {
     /// Builds a reqwest client configured for Orthanc + analysis endpoints and optional auth.
     ///
@@ -386,5 +396,110 @@ impl OrthancClient {
             tokio::time::sleep(Duration::from_secs(2)).await;
             attempt += 1;
         }
+    }
+
+    /// Queries local Orthanc by AccessionNumber and returns study IDs (Orthanc UUIDs).
+    pub async fn find_study_ids_by_accession(&self, accession: &str) -> Result<Vec<String>> {
+        let payload = json!({
+            "Level": "Study",
+            "Query": { "AccessionNumber": accession },
+        });
+        let resp = self
+            .client
+            .post(format!("{}/tools/find", self.base_url))
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()?;
+        
+        // Support both ["id1", "id2"] and [{"ID": "id1"}, ...]
+        let items: Vec<Value> = resp.json().await?;
+        let mut ids = Vec::new();
+        for item in items {
+            if let Some(s) = item.as_str() {
+                ids.push(s.to_string());
+            } else if let Some(obj) = item.as_object() {
+                if let Some(s) = obj.get("ID").and_then(|v| v.as_str()) {
+                    ids.push(s.to_string());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Fetches StudyInstanceUID and tags for a local Orthanc study UUID.
+    pub async fn get_study_meta(&self, study_id: &str) -> Result<StudyMeta> {
+        let resp = self
+            .client
+            .get(format!("{}/studies/{}", self.base_url, study_id))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = resp.json().await?;
+        let study_uid = body
+            .get("MainDicomTags")
+            .and_then(|t| t.get("StudyInstanceUID"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Ok(StudyMeta { study_uid })
+    }
+
+    /// Returns Orthanc series UUIDs under a study UUID.
+    pub async fn list_series_ids(&self, study_id: &str) -> Result<Vec<String>> {
+        let resp = self
+            .client
+            .get(format!("{}/studies/{}/series", self.base_url, study_id))
+            .send()
+            .await?
+            .error_for_status()?;
+        
+        // Support both ["id1", "id2"] and [{"ID": "id1"}, ...]
+        let items: Vec<Value> = resp.json().await?;
+        let mut ids = Vec::new();
+        for item in items {
+            if let Some(s) = item.as_str() {
+                ids.push(s.to_string());
+            } else if let Some(obj) = item.as_object() {
+                if let Some(s) = obj.get("ID").and_then(|v| v.as_str()) {
+                    ids.push(s.to_string());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Returns series metadata plus instance IDs for a series UUID.
+    pub async fn get_series_meta(&self, series_id: &str) -> Result<SeriesMeta> {
+        let resp = self
+            .client
+            .get(format!("{}/series/{}", self.base_url, series_id))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = resp.json().await?;
+        let series_uid = body
+            .get("MainDicomTags")
+            .and_then(|t| t.get("SeriesInstanceUID"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let description = body
+            .get("MainDicomTags")
+            .and_then(|t| t.get("SeriesDescription"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let instances: Vec<String> = body
+            .get("Instances")
+            .and_then(|arr| arr.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(SeriesMeta {
+            series_uid,
+            description,
+            instances,
+        })
     }
 }

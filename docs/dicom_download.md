@@ -20,23 +20,31 @@
   - 併發執行與重試策略。
 
 ## CLI 介面（規格）
-### 位置參數
-- `input_path`：CSV/JSON 檔案路徑。
+### 子命令
+- `dicom_download_cli remote ...`：C-MOVE 流程（對應舊 `dicom_download.py`），推送到目標 AET。
+- `dicom_download_cli download ...`：直接拉檔寫本機（對應 `download_dicom_matt_async.py`），需指定輸出目錄。
 
-### 參數與預設值
+### 共同參數
+- `-i, --input`：CSV/JSON 路徑（支援報表 CSV，再用 `AccessionNumber/acc/accession` 欄位取值）。
 - `--url`：Orthanc Base URL，預設 `http://10.103.1.193/orthanc-a`
+- `--username` / `--password`：Orthanc 認證（選填）
+- `--concurrency`：同時處理的 accession/實例併發，預設 `5`
+- `--report-csv` / `--report-json`：輸出報告路徑，預設 `report.csv` / `report.json`
+- `--config`：TOML 供預設值覆寫。
+
+### remote 專屬參數
 - `--analyze-url`：Analyze API URL，預設 `http://10.103.1.193:8000/api/v1/series/dicom/analyze/by-upload`
 - `--modality`：來源 Modality 名稱，預設 `INFINTT-SERVER`
 - `--target`：目的 AET，預設 `ORTHANC`
-- `--username`：Orthanc 帳號（選填）
-- `--password`：Orthanc 密碼（選填）
-- `--concurrency`：同時併發處理的 Accession 數量，預設 `5`
-- `--report-path`：輸出報告 CSV 路徑，預設 `report.csv`
+
+### download 專屬參數
+- `--output <DIR>`：必填，下載檔案的根資料夾。
 
 ## 輸入格式
 ### CSV
-- 必須有 header，且包含 `AccessionNumber` 欄位。
-- 其他欄位可忽略或保留作為擴充用途。
+- 具或不具 header 均可。
+- 優先尋找欄位（不分大小寫）：`AccessionNumber` / `accession` / `acc`。
+- 若未找到上述欄位，退回使用第 1 欄。
 
 ### JSON（兩種格式）
 1. 字串陣列：
