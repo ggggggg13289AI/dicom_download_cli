@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use dicom_object::open_file;
+use dicom_object::{open_file, Tag};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -83,33 +83,50 @@ pub struct CheckReport {
 // DICOM Tag Reading
 // ============================================================================
 
-/// Read the Diffusion b-value (0018,9087) from a DICOM file.
+/// Read the Diffusion b-value from a DICOM file.
+/// Checks multiple locations where b-value might be stored:
+/// 1. (0018,9087) DiffusionBValue - direct tag
+/// 2. (0018,9117) MRDiffusionSequence → (0018,9087)
+/// 3. (5200,9229) SharedFunctionalGroupsSequence → MRDiffusionSequence → DiffusionBValue
+/// 4. (0043,1039) Private GE tag for b-value
+/// 5. (0019,100c) Siemens private tag for b-value
+///
 /// Returns None if b-value is not found or is 0.
 /// Returns Some(value) for positive b-values.
 fn read_bvalue(path: &Path) -> Result<Option<u32>> {
     let obj = open_file(path).context("Failed to open DICOM file")?;
 
-    // Try primary tag: (0018,9087) DiffusionBValue
+    // Helper macro to convert element to u32
+    macro_rules! elem_to_u32 {
+        ($elem:expr) => {{
+            let elem = $elem;
+            let mut result: Option<u32> = None;
+            if let Ok(val) = elem.to_float32() {
+                result = Some(val.round() as u32);
+            } else if let Ok(val) = elem.to_int::<i32>() {
+                result = Some(val.unsigned_abs());
+            } else if let Ok(val_str) = elem.to_str() {
+                if let Ok(val) = val_str.trim().parse::<f32>() {
+                    result = Some(val.round() as u32);
+                }
+            }
+            result
+        }};
+    }
+
+    // Method 1: Try primary tag (0018,9087) DiffusionBValue
     if let Ok(elem) = obj.element_by_name("DiffusionBValue") {
-        if let Ok(val) = elem.to_float32() {
-            let bval = val as u32;
-            return Ok(if bval == 0 { None } else { Some(bval) });
-        }
-        if let Ok(val) = elem.to_int::<i32>() {
-            let bval = val as u32;
+        if let Some(bval) = elem_to_u32!(elem) {
             return Ok(if bval == 0 { None } else { Some(bval) });
         }
     }
 
-    // Try alternative: Check in MR Diffusion Sequence (0018,9117)
-    // This is a simplified approach - full implementation would need to traverse
-    // Shared Functional Groups Sequence (5200,9229) or Per-frame Functional Groups
+    // Method 2: Try MR Diffusion Sequence (0018,9117) → DiffusionBValue
     if let Ok(seq) = obj.element_by_name("MRDiffusionSequence") {
         if let Some(items) = seq.items() {
             if let Some(first_item) = items.first() {
                 if let Ok(bval_elem) = first_item.element_by_name("DiffusionBValue") {
-                    if let Ok(val) = bval_elem.to_float32() {
-                        let bval = val as u32;
+                    if let Some(bval) = elem_to_u32!(bval_elem) {
                         return Ok(if bval == 0 { None } else { Some(bval) });
                     }
                 }
@@ -117,7 +134,68 @@ fn read_bvalue(path: &Path) -> Result<Option<u32>> {
         }
     }
 
-    // b-value not found - treat as DWI0 (b=0)
+    // Method 3: Try Shared Functional Groups Sequence (5200,9229)
+    if let Ok(shared_seq) = obj.element(Tag(0x5200, 0x9229)) {
+        if let Some(items) = shared_seq.items() {
+            for item in items {
+                if let Ok(diff_seq) = item.element_by_name("MRDiffusionSequence") {
+                    if let Some(diff_items) = diff_seq.items() {
+                        if let Some(diff_item) = diff_items.first() {
+                            if let Ok(bval_elem) = diff_item.element_by_name("DiffusionBValue") {
+                                if let Some(bval) = elem_to_u32!(bval_elem) {
+                                    return Ok(if bval == 0 { None } else { Some(bval) });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Method 4: Try Per-frame Functional Groups Sequence (5200,9230)
+    if let Ok(perframe_seq) = obj.element(Tag(0x5200, 0x9230)) {
+        if let Some(items) = perframe_seq.items() {
+            if let Some(first_frame) = items.first() {
+                if let Ok(diff_seq) = first_frame.element_by_name("MRDiffusionSequence") {
+                    if let Some(diff_items) = diff_seq.items() {
+                        if let Some(diff_item) = diff_items.first() {
+                            if let Ok(bval_elem) = diff_item.element_by_name("DiffusionBValue") {
+                                if let Some(bval) = elem_to_u32!(bval_elem) {
+                                    return Ok(if bval == 0 { None } else { Some(bval) });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Method 5: Try GE private tag (0043,1039)
+    if let Ok(elem) = obj.element(Tag(0x0043, 0x1039)) {
+        if let Ok(val_str) = elem.to_str() {
+            // Parse first number from string like "1000\0\0"
+            if let Some(first_part) = val_str.split(['\\', '/', ' ']).next() {
+                if let Ok(bval) = first_part.trim().parse::<u32>() {
+                    return Ok(if bval == 0 { None } else { Some(bval) });
+                }
+            }
+        }
+        if let Some(bval) = elem_to_u32!(elem) {
+            return Ok(if bval == 0 { None } else { Some(bval) });
+        }
+    }
+
+    // Method 6: Try Siemens private tag (0019,100c)
+    if let Ok(elem) = obj.element(Tag(0x0019, 0x100c)) {
+        if let Some(bval) = elem_to_u32!(elem) {
+            return Ok(if bval == 0 { None } else { Some(bval) });
+        }
+    }
+
+    // b-value not found - treat as b=0 (DWI0)
+    // This is the expected behavior when the tag is missing or null
     Ok(None)
 }
 
@@ -219,25 +297,14 @@ async fn remove_if_empty(dir: &Path) -> Result<bool> {
 /// Rules:
 /// - b-value is None or 0 → should be in DWI0
 /// - b-value == 1000 → should be in DWI1000
+///
+/// If only DWI0 exists but contains b=1000 files, they will be moved to a new DWI1000 folder.
+/// If only DWI1000 exists but contains b=0 files, they will be moved to a new DWI0 folder.
 pub async fn check_dwi_series(study_dir: &Path) -> Result<Vec<SeriesCheckResult>> {
     let dwi_folders = find_dwi_folders(study_dir).await?;
 
-    // Need both DWI0 and DWI1000 folders to check
-    let has_dwi0 = dwi_folders.iter().any(|f| {
-        f.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == "DWI0")
-            .unwrap_or(false)
-    });
-    let has_dwi1000 = dwi_folders.iter().any(|f| {
-        f.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == "DWI1000")
-            .unwrap_or(false)
-    });
-
-    if !has_dwi0 || !has_dwi1000 {
-        // Need both folders for cross-checking
+    // Need at least one DWI folder to check
+    if dwi_folders.is_empty() {
         return Ok(vec![]);
     }
 
@@ -252,8 +319,10 @@ pub async fn check_dwi_series(study_dir: &Path) -> Result<Vec<SeriesCheckResult>
 
         let dcm_files = list_dcm_files(folder).await?;
         let mut actions = Vec::new();
+        let mut files_checked = 0;
 
         for dcm_file in &dcm_files {
+            files_checked += 1;
             match read_bvalue(dcm_file) {
                 Ok(bvalue) => {
                     // Determine where this file should be
@@ -286,23 +355,23 @@ pub async fn check_dwi_series(study_dir: &Path) -> Result<Vec<SeriesCheckResult>
                     }
                 }
                 Err(e) => {
+                    // This only happens if the DICOM file itself cannot be opened/parsed
                     eprintln!(
-                        "Warning: Failed to read b-value from {}: {}",
-                        dcm_file.display(),
+                        "Warning: Failed to read DICOM file {}: {}",
+                        dcm_file.file_name().unwrap_or_default().to_string_lossy(),
                         e
                     );
                 }
             }
         }
 
-        if !actions.is_empty() {
-            results.push(SeriesCheckResult {
-                series_folder: folder_name.to_string(),
-                check_type: CheckType::DWI,
-                files_checked: dcm_files.len(),
-                actions,
-            });
-        }
+        // Always report results if we checked files, even if no actions needed
+        results.push(SeriesCheckResult {
+            series_folder: folder_name.to_string(),
+            check_type: CheckType::DWI,
+            files_checked,
+            actions,
+        });
     }
 
     Ok(results)
@@ -571,6 +640,7 @@ async fn run_check_on_dir(base_dir: &Path, dry_run: bool) -> Result<CheckReport>
             Ok(dwi_results) => {
                 for result in dwi_results {
                     summary.total_files_checked += result.files_checked;
+                    summary.total_series_checked += 1;
 
                     if !result.actions.is_empty() {
                         // Execute actions
@@ -579,7 +649,8 @@ async fn run_check_on_dir(base_dir: &Path, dry_run: bool) -> Result<CheckReport>
                         summary.dwi_fixes += moves;
 
                         series_results.push(result);
-                        summary.total_series_checked += 1;
+                    } else {
+                        println!("  {} - {} files checked, no issues found", result.series_folder, result.files_checked);
                     }
                 }
             }
