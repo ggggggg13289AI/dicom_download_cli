@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use chrono::Local;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
@@ -245,6 +246,8 @@ async fn run_remote(args: RemoteArgs, cfg_path: &PathBuf) -> Result<()> {
 async fn run_check(args: CheckArgs) -> Result<()> {
     use crate::checker::{run_check, write_csv_report, write_json_report};
 
+    let start_time = Instant::now();
+
     println!("DICOM Structure Checker");
     println!("=======================");
     println!("Input directory: {}", args.input.display());
@@ -255,7 +258,12 @@ async fn run_check(args: CheckArgs) -> Result<()> {
     let report = run_check(&args.input, args.dry_run).await?;
 
     // Print summary
+    let elapsed = start_time.elapsed();
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+
     println!("\n========== Summary ==========");
+    println!("Completed at: {}", timestamp);
+    println!("Elapsed time: {:.2}s", elapsed.as_secs_f64());
     println!("Total studies scanned: {}", report.summary.total_studies);
     println!("Series with issues: {}", report.summary.total_series_checked);
     println!("Files checked: {}", report.summary.total_files_checked);
