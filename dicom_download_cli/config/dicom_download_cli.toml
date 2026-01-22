@@ -63,3 +63,17 @@ dcm2niix_args = ["-z", "y", "-b", "y"]
 
 # Delete DICOM files after successful conversion (default: false)
 delete_dicom_after_conversion = false
+
+## Per-instance analysis settings (for DWI0/DWI1000 separation)
+[per_instance]
+# Enable per-instance analysis (default: false)
+# When enabled, series matching trigger_prefixes will have each instance
+# analyzed individually to determine its series_type folder.
+enabled = true
+
+# Series type prefixes that trigger per-instance analysis.
+# E.g., ["DWI"] matches DWI, DWI0, DWI1000 returned by Analyze API.
+trigger_prefixes = ["DWI"]
+
+# Concurrency limit for Analyze API calls per series (default: 3)
+analyze_concurrency = 3
