@@ -191,6 +191,47 @@ impl ConversionConfig {
     }
 }
 
+/// Configuration for per-instance analysis (e.g., DWI0/DWI1000 separation).
+#[derive(Deserialize, Clone, Default)]
+pub struct PerInstanceConfig {
+    /// Enable per-instance analysis for series matching trigger_prefixes.
+    pub enabled: Option<bool>,
+    /// Series type prefixes that trigger per-instance analysis.
+    /// E.g., ["DWI"] matches DWI, DWI0, DWI1000.
+    pub trigger_prefixes: Option<Vec<String>>,
+    /// Concurrency limit for Analyze API calls per series.
+    pub analyze_concurrency: Option<usize>,
+}
+
+impl PerInstanceConfig {
+    /// Returns whether per-instance analysis is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
+    /// Returns the trigger prefixes, defaulting to ["DWI"].
+    pub fn get_trigger_prefixes(&self) -> Vec<String> {
+        self.trigger_prefixes
+            .clone()
+            .unwrap_or_else(|| vec!["DWI".into()])
+    }
+
+    /// Returns the analyze concurrency limit, defaulting to 3.
+    pub fn get_analyze_concurrency(&self) -> usize {
+        self.analyze_concurrency.unwrap_or(3)
+    }
+
+    /// Checks if per-instance analysis should be triggered for a given series type.
+    /// Returns true if enabled and the first_type starts with any trigger prefix.
+    pub fn should_analyze(&self, first_type: &str) -> bool {
+        self.is_enabled()
+            && self
+                .get_trigger_prefixes()
+                .iter()
+                .any(|prefix| first_type.starts_with(prefix))
+    }
+}
+
 #[derive(Deserialize, Default, Clone)]
 /// Runtime overrides loaded from the TOML config referenced by `main`.
 pub struct RuntimeConfigFile {
@@ -205,6 +246,8 @@ pub struct RuntimeConfigFile {
     pub report_json: Option<PathBuf>,
     /// dcm2niix conversion settings.
     pub conversion: Option<ConversionConfig>,
+    /// Per-instance analysis settings (for DWI0/DWI1000 separation).
+    pub per_instance: Option<PerInstanceConfig>,
 }
 
 /// Final configuration used throughout the download workflow.
