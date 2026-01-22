@@ -154,6 +154,8 @@ pub struct ConversionConfig {
     pub delete_dicom_after_conversion: Option<bool>,
     /// Number of concurrent dcm2niix conversions.
     pub concurrency: Option<usize>,
+    /// CSV report output path for convert command.
+    pub report_csv: Option<PathBuf>,
 }
 
 impl Default for ConversionConfig {
@@ -164,6 +166,7 @@ impl Default for ConversionConfig {
             dcm2niix_args: Some(vec!["-z".into(), "y".into(), "-b".into(), "y".into()]),
             delete_dicom_after_conversion: Some(false),
             concurrency: Some(1),
+            report_csv: None,
         }
     }
 }

@@ -162,6 +162,10 @@ struct ConvertArgs {
     /// Number of concurrent dcm2niix conversions (CLI > TOML > default: 1).
     #[arg(short, long)]
     concurrency: Option<usize>,
+
+    /// Output CSV report path (CLI > TOML).
+    #[arg(long)]
+    report_csv: Option<PathBuf>,
 }
 
 /// Entrypoint that wires CLI args, runtime config, Orthanc client, and processor workers.
@@ -307,6 +311,14 @@ async fn run_check(args: CheckArgs) -> Result<()> {
     Ok(())
 }
 
+/// Result enum for each conversion task.
+#[derive(Debug, Clone)]
+enum ConvertStatus {
+    Converted { nifti_count: usize, elapsed_ms: u64 },
+    Skipped,
+    Failed { error: Option<String> },
+}
+
 /// Convert existing DICOM files to NIfTI format using dcm2niix.
 ///
 /// Expected input structure: input/dicom/StudyFolder/SeriesFolder/*.dcm
@@ -323,10 +335,11 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         .and_then(|f| f.conversion.clone())
         .unwrap_or_default();
 
-    // Merge concurrency: CLI > TOML > default (1)
+    // Merge settings: CLI > TOML > default
     let concurrency = args
         .concurrency
         .unwrap_or_else(|| conversion_config.get_concurrency());
+    let report_csv_path = args.report_csv.or(conversion_config.report_csv.clone());
 
     println!("DICOM to NIfTI Converter");
     println!("========================");
@@ -340,6 +353,9 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         }
     );
     println!("Concurrency: {}", concurrency);
+    if let Some(ref csv_path) = report_csv_path {
+        println!("Report CSV: {}", csv_path.display());
+    }
 
     // Check dcm2niix availability
     let dcm2niix_path = conversion_config.get_dcm2niix_path();
@@ -391,14 +407,6 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         let total = series_list.len();
         let dcm2niix_args = conversion_config.get_dcm2niix_args();
         let dcm2niix_path_owned = dcm2niix_path.to_string();
-
-        // Result enum for each conversion task
-        #[derive(Debug)]
-        enum ConvertStatus {
-            Converted { nifti_count: usize, elapsed_ms: u64 },
-            Skipped,
-            Failed { error: Option<String> },
-        }
 
         // Process series with buffered concurrency (maintains order)
         let results: Vec<(usize, String, String, ConvertStatus)> = stream::iter(
@@ -458,28 +466,41 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         .collect()
         .await;
 
-        // Print results in order and count statistics
+        // Print results in order and aggregate by study for CSV report
         let mut converted = 0;
         let mut failed = 0;
         let mut skipped = 0;
 
-        for (idx, study_folder, series_folder, status) in results {
+        // Aggregate results by study folder for CSV report
+        let mut study_results: HashMap<String, (usize, usize, usize, Vec<String>)> = HashMap::new();
+
+        for (idx, study_folder, series_folder, status) in &results {
             print!("[{}/{}] {}/{} ... ", idx + 1, total, study_folder, series_folder);
+
+            let entry = study_results
+                .entry(study_folder.clone())
+                .or_insert((0, 0, 0, Vec::new()));
+
             match status {
                 ConvertStatus::Converted { nifti_count, elapsed_ms } => {
-                    println!("✓ ({} files, {:.1}s)", nifti_count, elapsed_ms as f64 / 1000.0);
+                    println!("✓ ({} files, {:.1}s)", nifti_count, *elapsed_ms as f64 / 1000.0);
                     converted += 1;
+                    entry.0 += 1; // converted count
                 }
                 ConvertStatus::Skipped => {
                     println!("⏭ skipped (already exists)");
                     skipped += 1;
+                    entry.2 += 1; // skipped count
                 }
                 ConvertStatus::Failed { error } => {
                     println!("✗ failed");
                     if let Some(err) = error {
-                        eprintln!("    Error: {}", err.lines().next().unwrap_or(&err));
+                        let first_line = err.lines().next().unwrap_or(err);
+                        eprintln!("    Error: {}", first_line);
+                        entry.3.push(format!("{}: {}", series_folder, first_line));
                     }
                     failed += 1;
+                    entry.1 += 1; // failed count
                 }
             }
         }
@@ -497,8 +518,64 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         println!("Skipped (existing): {}", skipped);
         println!("Failed: {}", failed);
         println!("Output directory: {}", niix_root.display());
+
+        // Write CSV report if path is specified
+        if let Some(csv_path) = report_csv_path {
+            write_convert_csv_report(&csv_path, &study_results)?;
+            println!("Report written: {}", csv_path.display());
+        }
     }
 
+    Ok(())
+}
+
+/// Write conversion results to CSV file, aggregated by study folder.
+fn write_convert_csv_report(
+    path: &PathBuf,
+    study_results: &HashMap<String, (usize, usize, usize, Vec<String>)>,
+) -> Result<()> {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    // Write header
+    writeln!(writer, "StudyFolder,Status,Reason,ConvertedCount,SkippedCount,FailedCount")?;
+
+    // Sort by study folder name for consistent output
+    let mut studies: Vec<_> = study_results.iter().collect();
+    studies.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (study_folder, (converted, failed, skipped, errors)) in studies {
+        let status = if *failed > 0 {
+            "PartialFailed"
+        } else if *converted > 0 {
+            "Success"
+        } else {
+            "Skipped"
+        };
+
+        let reason = if errors.is_empty() {
+            String::new()
+        } else {
+            errors.join("; ")
+        };
+
+        // Escape CSV fields
+        let reason_escaped = if reason.contains(',') || reason.contains('"') || reason.contains('\n') {
+            format!("\"{}\"", reason.replace('"', "\"\""))
+        } else {
+            reason
+        };
+
+        writeln!(
+            writer,
+            "{},{},{},{},{},{}",
+            study_folder, status, reason_escaped, converted, skipped, failed
+        )?;
+    }
+
+    writer.flush()?;
     Ok(())
 }
 
