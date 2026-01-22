@@ -158,6 +158,10 @@ struct ConvertArgs {
     /// Dry-run mode: show what would be converted without actually converting.
     #[arg(long)]
     dry_run: bool,
+
+    /// Number of concurrent dcm2niix conversions (CLI > TOML > default: 1).
+    #[arg(short, long)]
+    concurrency: Option<usize>,
 }
 
 /// Entrypoint that wires CLI args, runtime config, Orthanc client, and processor workers.
@@ -319,6 +323,11 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         .and_then(|f| f.conversion.clone())
         .unwrap_or_default();
 
+    // Merge concurrency: CLI > TOML > default (1)
+    let concurrency = args
+        .concurrency
+        .unwrap_or_else(|| conversion_config.get_concurrency());
+
     println!("DICOM to NIfTI Converter");
     println!("========================");
     println!("Input directory: {}", args.input.display());
@@ -330,6 +339,7 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
             "EXECUTE"
         }
     );
+    println!("Concurrency: {}", concurrency);
 
     // Check dcm2niix availability
     let dcm2niix_path = conversion_config.get_dcm2niix_path();
@@ -379,58 +389,96 @@ async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
         fs::create_dir_all(&niix_root).await?;
 
         let total = series_list.len();
+        let dcm2niix_args = conversion_config.get_dcm2niix_args();
+        let dcm2niix_path_owned = dcm2niix_path.to_string();
+
+        // Result enum for each conversion task
+        #[derive(Debug)]
+        enum ConvertStatus {
+            Converted { nifti_count: usize, elapsed_ms: u64 },
+            Skipped,
+            Failed { error: Option<String> },
+        }
+
+        // Process series with buffered concurrency (maintains order)
+        let results: Vec<(usize, String, String, ConvertStatus)> = stream::iter(
+            series_list.into_iter().enumerate(),
+        )
+        .map(|(idx, (study_folder, series_folder, series_path))| {
+            let niix_root = niix_root.clone();
+            let dcm2niix_path = dcm2niix_path_owned.clone();
+            let dcm2niix_args = dcm2niix_args.clone();
+
+            async move {
+                let niix_study_dir = niix_root.join(&study_folder);
+
+                // Check if already converted
+                let expected_nifti = niix_study_dir.join(format!("{}.nii.gz", &series_folder));
+                if expected_nifti.exists() {
+                    return (idx, study_folder, series_folder, ConvertStatus::Skipped);
+                }
+
+                // Perform conversion
+                match convert_series_to_nifti(
+                    &series_path,
+                    &niix_study_dir,
+                    &series_folder,
+                    &dcm2niix_path,
+                    &dcm2niix_args,
+                )
+                .await
+                {
+                    Ok(result) if result.success => (
+                        idx,
+                        study_folder,
+                        series_folder,
+                        ConvertStatus::Converted {
+                            nifti_count: result.nifti_files.len(),
+                            elapsed_ms: result.elapsed_ms,
+                        },
+                    ),
+                    Ok(result) => (
+                        idx,
+                        study_folder,
+                        series_folder,
+                        ConvertStatus::Failed { error: result.error },
+                    ),
+                    Err(e) => (
+                        idx,
+                        study_folder,
+                        series_folder,
+                        ConvertStatus::Failed {
+                            error: Some(e.to_string()),
+                        },
+                    ),
+                }
+            }
+        })
+        .buffered(concurrency)
+        .collect()
+        .await;
+
+        // Print results in order and count statistics
         let mut converted = 0;
         let mut failed = 0;
         let mut skipped = 0;
 
-        let dcm2niix_args = conversion_config.get_dcm2niix_args();
-
-        for (idx, (study_folder, series_folder, series_path)) in series_list.iter().enumerate() {
-            let niix_study_dir = niix_root.join(study_folder);
-
-            print!(
-                "[{}/{}] {}/{} ... ",
-                idx + 1,
-                total,
-                study_folder,
-                series_folder
-            );
-
-            // Check if already converted
-            let expected_nifti = niix_study_dir.join(format!("{}.nii.gz", series_folder));
-            if expected_nifti.exists() {
-                println!("⏭ skipped (already exists)");
-                skipped += 1;
-                continue;
-            }
-
-            match convert_series_to_nifti(
-                series_path,
-                &niix_study_dir,
-                series_folder,
-                dcm2niix_path,
-                &dcm2niix_args,
-            )
-            .await
-            {
-                Ok(result) if result.success => {
-                    println!(
-                        "✓ ({} files, {:.1}s)",
-                        result.nifti_files.len(),
-                        result.elapsed_ms as f64 / 1000.0
-                    );
+        for (idx, study_folder, series_folder, status) in results {
+            print!("[{}/{}] {}/{} ... ", idx + 1, total, study_folder, series_folder);
+            match status {
+                ConvertStatus::Converted { nifti_count, elapsed_ms } => {
+                    println!("✓ ({} files, {:.1}s)", nifti_count, elapsed_ms as f64 / 1000.0);
                     converted += 1;
                 }
-                Ok(result) => {
-                    println!("✗ no output (possibly non-image DICOM)");
-                    if let Some(err) = result.error {
+                ConvertStatus::Skipped => {
+                    println!("⏭ skipped (already exists)");
+                    skipped += 1;
+                }
+                ConvertStatus::Failed { error } => {
+                    println!("✗ failed");
+                    if let Some(err) = error {
                         eprintln!("    Error: {}", err.lines().next().unwrap_or(&err));
                     }
-                    failed += 1;
-                }
-                Err(e) => {
-                    println!("✗ error");
-                    eprintln!("    Error: {}", e);
                     failed += 1;
                 }
             }

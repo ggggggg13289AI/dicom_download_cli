@@ -152,6 +152,8 @@ pub struct ConversionConfig {
     pub dcm2niix_args: Option<Vec<String>>,
     /// Delete DICOM files after successful conversion.
     pub delete_dicom_after_conversion: Option<bool>,
+    /// Number of concurrent dcm2niix conversions.
+    pub concurrency: Option<usize>,
 }
 
 impl Default for ConversionConfig {
@@ -161,6 +163,7 @@ impl Default for ConversionConfig {
             dcm2niix_path: Some(DEFAULT_DCM2NIIX_PATH.to_string()),
             dcm2niix_args: Some(vec!["-z".into(), "y".into(), "-b".into(), "y".into()]),
             delete_dicom_after_conversion: Some(false),
+            concurrency: Some(1),
         }
     }
 }
@@ -188,6 +191,11 @@ impl ConversionConfig {
     /// Returns whether to delete DICOM files after conversion.
     pub fn should_delete_dicom(&self) -> bool {
         self.delete_dicom_after_conversion.unwrap_or(false)
+    }
+
+    /// Returns the number of concurrent conversions, falling back to 1.
+    pub fn get_concurrency(&self) -> usize {
+        self.concurrency.unwrap_or(1)
     }
 }
 
