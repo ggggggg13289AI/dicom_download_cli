@@ -10,3 +10,11 @@ Thumbs.db
 .idea/
 env/
 __pycache__/
+
+/.pm-workflow
+/.serena
+/config
+/core
+
+/.claude
+/.workflow
