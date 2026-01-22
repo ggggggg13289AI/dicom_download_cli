@@ -52,6 +52,8 @@ enum Commands {
     Download(DownloadArgs),
     /// Check and fix DICOM file structure issues (DWI b-value, ADC duplicates)
     Check(CheckArgs),
+    /// Convert existing DICOM files to NIfTI format using dcm2niix
+    Convert(ConvertArgs),
 }
 
 #[derive(Args, Clone)]
@@ -145,6 +147,19 @@ struct CheckArgs {
     report_json: Option<PathBuf>,
 }
 
+#[derive(Args, Clone)]
+struct ConvertArgs {
+    /// Root directory containing downloaded DICOM files.
+    /// Expected structure: input/dicom/StudyFolder/SeriesFolder/*.dcm
+    /// Output will be written to: input/niix/StudyFolder/SeriesName.nii.gz
+    #[arg(short, long, value_name = "DIR")]
+    input: PathBuf,
+
+    /// Dry-run mode: show what would be converted without actually converting.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 /// Entrypoint that wires CLI args, runtime config, Orthanc client, and processor workers.
 ///
 /// It loads overrides, creates the HTTP client, parses accessions, runs bounded async workers,
@@ -161,6 +176,7 @@ async fn main() -> Result<()> {
         Commands::Remote(cmd) => run_remote(cmd, &cfg_path).await,
         Commands::Download(cmd) => run_download(cmd, &cfg_path).await,
         Commands::Check(cmd) => run_check(cmd).await,
+        Commands::Convert(cmd) => run_convert(cmd, &cfg_path).await,
     }
 }
 
@@ -285,6 +301,219 @@ async fn run_check(args: CheckArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Convert existing DICOM files to NIfTI format using dcm2niix.
+///
+/// Expected input structure: input/dicom/StudyFolder/SeriesFolder/*.dcm
+/// Output structure: input/niix/StudyFolder/SeriesName.nii.gz
+async fn run_convert(args: ConvertArgs, cfg_path: &PathBuf) -> Result<()> {
+    use anyhow::anyhow;
+
+    let start_time = Instant::now();
+
+    // Load conversion config from TOML
+    let runtime_file = load_runtime_config(Some(cfg_path))?;
+    let conversion_config = runtime_file
+        .as_ref()
+        .and_then(|f| f.conversion.clone())
+        .unwrap_or_default();
+
+    println!("DICOM to NIfTI Converter");
+    println!("========================");
+    println!("Input directory: {}", args.input.display());
+    println!(
+        "Mode: {}",
+        if args.dry_run {
+            "DRY-RUN (no changes will be made)"
+        } else {
+            "EXECUTE"
+        }
+    );
+
+    // Check dcm2niix availability
+    let dcm2niix_path = conversion_config.get_dcm2niix_path();
+    if !args.dry_run && !check_dcm2niix_available(dcm2niix_path) {
+        return Err(anyhow!(
+            "dcm2niix not found at '{}'. Please install dcm2niix or specify the correct path in config.",
+            dcm2niix_path
+        ));
+    }
+    println!("dcm2niix path: {}", dcm2niix_path);
+    println!();
+
+    // Detect dicom/ directory
+    let dicom_root = args.input.join("dicom");
+    if !dicom_root.exists() {
+        return Err(anyhow!(
+            "Expected dicom/ subdirectory not found in {}",
+            args.input.display()
+        ));
+    }
+    let niix_root = args.input.join("niix");
+
+    // Collect all series to convert
+    let series_list = collect_series_for_conversion(&dicom_root).await?;
+
+    if series_list.is_empty() {
+        println!("No DICOM series found to convert.");
+        return Ok(());
+    }
+
+    println!("Found {} series to convert.", series_list.len());
+    println!();
+
+    if args.dry_run {
+        // Dry-run: just print what would be converted
+        println!("[DRY-RUN] Would convert:");
+        for (study_folder, series_folder, _) in &series_list {
+            println!(
+                "  dicom/{}/{} → niix/{}/{}.nii.gz",
+                study_folder, series_folder, study_folder, series_folder
+            );
+        }
+        println!();
+        println!("[DRY-RUN] Total: {} series to convert", series_list.len());
+    } else {
+        // Execute conversion
+        fs::create_dir_all(&niix_root).await?;
+
+        let total = series_list.len();
+        let mut converted = 0;
+        let mut failed = 0;
+        let mut skipped = 0;
+
+        let dcm2niix_args = conversion_config.get_dcm2niix_args();
+
+        for (idx, (study_folder, series_folder, series_path)) in series_list.iter().enumerate() {
+            let niix_study_dir = niix_root.join(study_folder);
+
+            print!(
+                "[{}/{}] {}/{} ... ",
+                idx + 1,
+                total,
+                study_folder,
+                series_folder
+            );
+
+            // Check if already converted
+            let expected_nifti = niix_study_dir.join(format!("{}.nii.gz", series_folder));
+            if expected_nifti.exists() {
+                println!("⏭ skipped (already exists)");
+                skipped += 1;
+                continue;
+            }
+
+            match convert_series_to_nifti(
+                series_path,
+                &niix_study_dir,
+                series_folder,
+                dcm2niix_path,
+                &dcm2niix_args,
+            )
+            .await
+            {
+                Ok(result) if result.success => {
+                    println!(
+                        "✓ ({} files, {:.1}s)",
+                        result.nifti_files.len(),
+                        result.elapsed_ms as f64 / 1000.0
+                    );
+                    converted += 1;
+                }
+                Ok(result) => {
+                    println!("✗ no output (possibly non-image DICOM)");
+                    if let Some(err) = result.error {
+                        eprintln!("    Error: {}", err.lines().next().unwrap_or(&err));
+                    }
+                    failed += 1;
+                }
+                Err(e) => {
+                    println!("✗ error");
+                    eprintln!("    Error: {}", e);
+                    failed += 1;
+                }
+            }
+        }
+
+        // Print summary
+        let elapsed = start_time.elapsed();
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+
+        println!();
+        println!("========== Summary ==========");
+        println!("Completed at: {}", timestamp);
+        println!("Elapsed time: {:.2}s", elapsed.as_secs_f64());
+        println!("Total series: {}", total);
+        println!("Converted: {}", converted);
+        println!("Skipped (existing): {}", skipped);
+        println!("Failed: {}", failed);
+        println!("Output directory: {}", niix_root.display());
+    }
+
+    Ok(())
+}
+
+/// Walk dicom_root and collect (study_folder, series_folder, series_path) tuples.
+///
+/// Expected structure:
+/// - Level 1: Study folders (e.g., PatientID_StudyDate_Modality_Accession)
+/// - Level 2: Series folders (e.g., T1, T2, DWI) containing .dcm files
+async fn collect_series_for_conversion(
+    dicom_root: &Path,
+) -> Result<Vec<(String, String, PathBuf)>> {
+    let mut series_list = Vec::new();
+
+    // Level 1: Study folders
+    let mut study_entries = fs::read_dir(dicom_root).await?;
+    while let Some(study_entry) = study_entries.next_entry().await? {
+        let study_path = study_entry.path();
+        if !study_path.is_dir() {
+            continue;
+        }
+        let study_folder = study_entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
+        // Level 2: Series folders
+        let mut series_entries = fs::read_dir(&study_path).await?;
+        while let Some(series_entry) = series_entries.next_entry().await? {
+            let series_path = series_entry.path();
+            if !series_path.is_dir() {
+                continue;
+            }
+            let series_folder = series_entry
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+
+            // Check if directory contains .dcm files
+            let has_dcm = has_dcm_files(&series_path).await;
+            if has_dcm {
+                series_list.push((study_folder.clone(), series_folder, series_path));
+            }
+        }
+    }
+
+    // Sort for consistent ordering
+    series_list.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+
+    Ok(series_list)
+}
+
+/// Check if a directory contains any .dcm files.
+async fn has_dcm_files(dir: &Path) -> bool {
+    if let Ok(mut entries) = fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(ext) = entry.path().extension() {
+                if ext.to_string_lossy().to_lowercase() == "dcm" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 async fn run_download(args: DownloadArgs, cfg_path: &PathBuf) -> Result<()> {
