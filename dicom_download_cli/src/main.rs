@@ -24,7 +24,7 @@ use crate::client::{
 };
 use crate::config::{
     load_runtime_config, sanitize_optional_string, AnalysisConfig, ConversionConfig,
-    EffectiveConfig, RuntimeConfigFile, DEFAULT_CONFIG_PATH,
+    EffectiveConfig, PerInstanceConfig, RuntimeConfigFile, DEFAULT_CONFIG_PATH,
 };
 use crate::converter::{check_dcm2niix_available, convert_series_to_nifti, delete_dicom_files};
 use crate::processor::{process_single_accession, summarize_status, write_reports, ProcessResult};
@@ -260,9 +260,14 @@ async fn run_download(args: DownloadArgs, cfg_path: &PathBuf) -> Result<()> {
         fs::create_dir_all(&niix_root).await?;
     }
 
-    let analyze_enabled =
-        args.shared.analyze_url.is_some() || effective.analyze_url != config::DEFAULT_ANALYZE_URL;
+    // let analyze_enabled =
+    //     args.shared.analyze_url.is_some() || effective.analyze_url != config::DEFAULT_ANALYZE_URL;
 
+    let analyze_enabled = args.shared.analyze_url.is_some()
+        || runtime_file
+            .as_ref()
+            .and_then(|f| f.analyze_url.as_ref())
+            .is_some();
     println!(
         "Processing {} accessions via direct download to {}...",
         accessions.len(),
@@ -296,6 +301,20 @@ async fn run_download(args: DownloadArgs, cfg_path: &PathBuf) -> Result<()> {
 
     let conversion_config = Arc::new(conversion_config);
 
+    // Get per-instance config from runtime file or use defaults
+    let per_instance_config = runtime_file
+        .as_ref()
+        .and_then(|f| f.per_instance.clone())
+        .unwrap_or_default();
+    let per_instance_config = Arc::new(per_instance_config);
+
+    if per_instance_config.is_enabled() {
+        println!(
+            "Per-instance analysis: enabled (triggers: {:?})",
+            per_instance_config.get_trigger_prefixes()
+        );
+    }
+
     // 循序處理每個 accession（一個一個 study 下載）
     // Series/Instance 層級使用併發
     let mut results: Vec<ProcessResult> = Vec::with_capacity(accessions.len());
@@ -309,6 +328,7 @@ async fn run_download(args: DownloadArgs, cfg_path: &PathBuf) -> Result<()> {
             analyze_enabled,
             convert_enabled,
             conversion_config.clone(),
+            per_instance_config.clone(),
             retry_config.clone(),
         )
         .await;
@@ -436,10 +456,13 @@ fn generate_series_folder_name(
 }
 
 /// 建立下載計畫（與 Python build_download_plan 對齊）
+/// 支援 per-instance 分析模式：當第一個 instance 的 series_type 匹配 trigger_prefixes 時，
+/// 對所有 instances 進行個別分析並分組到不同資料夾。
 async fn build_download_plan(
-    client: &OrthancClient,
+    client: Arc<OrthancClient>,
     accession: &str,
     analyze_enabled: bool,
+    per_instance_config: &PerInstanceConfig,
 ) -> Result<Vec<DownloadPlan>> {
     let mut plans = Vec::new();
 
@@ -487,9 +510,9 @@ async fn build_download_plan(
                 }
             }
 
-            // 決定 series_type
-            let series_type = if analyze_enabled {
-                // 呼叫 Analyze API
+            // 決定 series_type（支援 per-instance 模式）
+            let first_series_type = if analyze_enabled {
+                // 呼叫 Analyze API 分析第一個 instance
                 match client.analyze_dicom_data(dicom_data).await {
                     Ok(Some(t)) if t.to_lowercase() != "unknown" => t,
                     _ => meta
@@ -503,12 +526,54 @@ async fn build_download_plan(
                     .unwrap_or_else(|| "Unknown".to_string())
             };
 
-            series_info.push((
-                series_id.clone(),
-                series_type,
-                meta.series_number.clone(),
-                meta.instances.clone(),
-            ));
+            // 檢查是否需要 per-instance 分析
+            if analyze_enabled && per_instance_config.should_analyze(&first_series_type) {
+                // Per-instance 模式：分析每個 instance 並按 type 分組
+                let analyze_concurrency = per_instance_config.get_analyze_concurrency();
+
+                // 並發分析所有 instances
+                let instance_types: Vec<(String, String)> = stream::iter(meta.instances.iter().cloned())
+                    .map(|inst_id| {
+                        let client = client.clone();
+                        async move {
+                            let inst_type = match client.download_instance_file(&inst_id).await {
+                                Ok(data) => match client.analyze_dicom_data(data).await {
+                                    Ok(Some(t)) if t.to_lowercase() != "unknown" => t,
+                                    _ => "Unknown".to_string(),
+                                },
+                                Err(_) => "Unknown".to_string(),
+                            };
+                            (inst_id, inst_type)
+                        }
+                    })
+                    .buffer_unordered(analyze_concurrency)
+                    .collect()
+                    .await;
+
+                // 按 series_type 分組 instances
+                let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+                for (inst_id, inst_type) in instance_types {
+                    grouped.entry(inst_type).or_default().push(inst_id);
+                }
+
+                // 為每個分組創建 series_info 條目
+                for (group_type, instances) in grouped {
+                    series_info.push((
+                        series_id.clone(),
+                        group_type,
+                        meta.series_number.clone(),
+                        instances,
+                    ));
+                }
+            } else {
+                // 標準模式：所有 instances 使用相同 series_type
+                series_info.push((
+                    series_id.clone(),
+                    first_series_type,
+                    meta.series_number.clone(),
+                    meta.instances.clone(),
+                ));
+            }
         }
 
         // 計算每個 series_type 的出現次數
@@ -677,6 +742,7 @@ async fn download_accession_v2(
     analyze_enabled: bool,
     convert_enabled: bool,
     conversion_config: Arc<ConversionConfig>,
+    per_instance_config: Arc<PerInstanceConfig>,
     retry_config: RetryConfig,
 ) -> ProcessResult {
     let mut res = ProcessResult {
@@ -686,7 +752,7 @@ async fn download_accession_v2(
     };
 
     // 建立下載計畫
-    let plans = match build_download_plan(&client, &acc, analyze_enabled).await {
+    let plans = match build_download_plan(client.clone(), &acc, analyze_enabled, &per_instance_config).await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             res.reason.push("No studies found".into());
