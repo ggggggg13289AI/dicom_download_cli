@@ -2,6 +2,7 @@
 //!
 //! It batches accessions from CSV/JSON, consults Orthanc and an optional analysis service,
 //! and writes success/failure reports in CSV/JSON formats.
+mod checker;
 mod client;
 mod config;
 mod converter;
@@ -48,6 +49,8 @@ enum Commands {
     Remote(RemoteArgs),
     /// Direct file download flow (maps to download_dicom_matt_async.py)
     Download(DownloadArgs),
+    /// Check and fix DICOM file structure issues (DWI b-value, ADC duplicates)
+    Check(CheckArgs),
 }
 
 #[derive(Args, Clone)]
@@ -121,6 +124,26 @@ struct DownloadArgs {
     timeout: u64,
 }
 
+#[derive(Args, Clone)]
+struct CheckArgs {
+    /// Root directory containing downloaded DICOM files.
+    /// Expected structure: input/dicom/PatientID_StudyDate_Modality_Accession/SeriesFolder/
+    #[arg(short, long, value_name = "DIR")]
+    input: PathBuf,
+
+    /// Dry-run mode: show what would be done without making changes.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Output report path (CSV format).
+    #[arg(long)]
+    report_csv: Option<PathBuf>,
+
+    /// Output report path (JSON format).
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+}
+
 /// Entrypoint that wires CLI args, runtime config, Orthanc client, and processor workers.
 ///
 /// It loads overrides, creates the HTTP client, parses accessions, runs bounded async workers,
@@ -136,6 +159,7 @@ async fn main() -> Result<()> {
     match args.command {
         Commands::Remote(cmd) => run_remote(cmd, &cfg_path).await,
         Commands::Download(cmd) => run_download(cmd, &cfg_path).await,
+        Commands::Check(cmd) => run_check(cmd).await,
     }
 }
 
@@ -214,6 +238,43 @@ async fn run_remote(args: RemoteArgs, cfg_path: &PathBuf) -> Result<()> {
         ok,
         results.len() - ok
     );
+
+    Ok(())
+}
+
+async fn run_check(args: CheckArgs) -> Result<()> {
+    use crate::checker::{run_check, write_csv_report, write_json_report};
+
+    println!("DICOM Structure Checker");
+    println!("=======================");
+    println!("Input directory: {}", args.input.display());
+    println!("Mode: {}", if args.dry_run { "DRY-RUN (no changes will be made)" } else { "EXECUTE" });
+    println!();
+
+    // Run the check
+    let report = run_check(&args.input, args.dry_run).await?;
+
+    // Print summary
+    println!("\n========== Summary ==========");
+    println!("Total studies scanned: {}", report.summary.total_studies);
+    println!("Series with issues: {}", report.summary.total_series_checked);
+    println!("Files checked: {}", report.summary.total_files_checked);
+    println!("DWI fixes (moves): {}", report.summary.dwi_fixes);
+    println!("ADC duplicates removed: {}", report.summary.adc_duplicates_removed);
+    println!("Total moves: {}", report.summary.total_moves);
+    println!("Total deletes: {}", report.summary.total_deletes);
+
+    if args.dry_run {
+        println!("\n[DRY-RUN] No changes were made. Run without --dry-run to apply fixes.");
+    }
+
+    // Write reports if requested
+    if let Some(csv_path) = &args.report_csv {
+        write_csv_report(&report, csv_path)?;
+    }
+    if let Some(json_path) = &args.report_json {
+        write_json_report(&report, json_path)?;
+    }
 
     Ok(())
 }
